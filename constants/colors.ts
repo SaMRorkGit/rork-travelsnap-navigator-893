@@ -1,0 +1,15 @@
+export default {
+  primary: "#1E88E5",
+  primaryDark: "#1565C0",
+  secondary: "#06B6D4",
+  background: "#F8FAFC",
+  surface: "#FFFFFF",
+  text: "#0F172A",
+  textSecondary: "#64748B",
+  textLight: "#94A3B8",
+  border: "#E2E8F0",
+  error: "#EF4444",
+  success: "#10B981",
+  warning: "#F59E0B",
+  overlay: "rgba(15, 23, 42, 0.5)",
+};
