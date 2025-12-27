@@ -123,6 +123,15 @@ export default function SpeakDestinationScreen() {
   const pulseAnim = useRef(new Animated.Value(1)).current;
   const mapRef = useRef<MapView>(null);
   const isMountedRef = useRef(true);
+  const flowStateRef = useRef(flowState);
+  const recognizedTextRef = useRef(recognizedText);
+  const extractedDestinationRef = useRef(extractedDestination);
+
+  useEffect(() => {
+    flowStateRef.current = flowState;
+    recognizedTextRef.current = recognizedText;
+    extractedDestinationRef.current = extractedDestination;
+  }, [flowState, recognizedText, extractedDestination]);
 
   useEffect(() => {
     if (flowState === 'listening') {
@@ -300,6 +309,18 @@ export default function SpeakDestinationScreen() {
         },
         onDisconnected: () => {
           console.log('[SpeakDestination] Deepgram disconnected');
+          
+          // If we were in a listening state and got disconnected unexpectedly
+          if (isMountedRef.current && flowStateRef.current === 'listening') {
+             console.warn('[SpeakDestination] Unexpected disconnection while listening');
+             setConnectionStatus('Connection lost. Reconnecting...');
+             // We could trigger a retry here or just show error
+             // The service has internal retry logic for initial connection, 
+             // but if it drops AFTER connecting, we might need to handle it.
+             // For now, let's let the user know.
+             setFlowState('error');
+             setErrorMessage('Voice connection lost. Please check your internet and try again.');
+          }
         },
       });
       
@@ -348,11 +369,11 @@ export default function SpeakDestinationScreen() {
       setConnectionStatus('Processing speech...');
       
       setTimeout(() => {
-        if (isMountedRef.current && flowState === 'processing' && !extractedDestination) {
-          if (recognizedText && recognizedText.trim() !== '') {
+        if (isMountedRef.current && flowStateRef.current === 'processing' && !extractedDestinationRef.current) {
+          if (recognizedTextRef.current && recognizedTextRef.current.trim() !== '') {
              // If we have text but no function call, let's try to use the text as destination
              console.log('[SpeakDestination] Timeout waiting for function call. Using transcript as destination.');
-             setExtractedDestination(recognizedText);
+             setExtractedDestination(recognizedTextRef.current);
              setFlowState('confirming');
           } else {
              // Only error if we really have nothing
@@ -360,7 +381,7 @@ export default function SpeakDestinationScreen() {
              // setErrorMessage('No speech detected. Please try again.');
              // Actually, staying in processing or going back to idle might be better, 
              // but let's show error to be explicit as requested.
-             if (flowState === 'processing') {
+             if (flowStateRef.current === 'processing') {
                 setFlowState('error');
                 setErrorMessage('I didn\'t catch that. Please speak clearly.');
              }
@@ -376,7 +397,7 @@ export default function SpeakDestinationScreen() {
         setRecognizedText('');
       }
     }
-  }, [flowState, extractedDestination, recognizedText]);
+  }, []);
 
   const confirmDestination = useCallback(async () => {
     const destinationToUse = extractedDestination || recognizedText;
@@ -579,6 +600,12 @@ export default function SpeakDestinationScreen() {
       </TouchableOpacity>
       
       <View style={styles.runtimeCheckContainer}>
+        <View style={styles.liveIndicatorContainer}>
+          <View style={[styles.statusDot, { backgroundColor: connectionStatus.includes('Connected') || isReadyToSpeak ? Colors.success : Colors.warning }]} />
+          <Text style={styles.runtimeCheckText}>
+             {connectionStatus}
+          </Text>
+        </View>
         <Text style={styles.runtimeCheckText}>
           API Check: {process.env.EXPO_PUBLIC_DEEPGRAM_API_KEY ? '✅ Voice' : '❌ Voice'} • {process.env.EXPO_PUBLIC_MAPBOX_ACCESS_TOKEN ? '✅ Maps' : '❌ Maps'}
         </Text>
@@ -1346,13 +1373,37 @@ const styles = StyleSheet.create({
     position: 'absolute',
     bottom: 20,
     alignSelf: 'center',
-    paddingVertical: 4,
-    paddingHorizontal: 12,
-    backgroundColor: 'rgba(0,0,0,0.05)',
-    borderRadius: 12,
+    paddingVertical: 8,
+    paddingHorizontal: 16,
+    backgroundColor: 'rgba(255,255,255,0.9)',
+    borderRadius: 20,
+    shadowColor: "#000",
+    shadowOffset: {
+      width: 0,
+      height: 2,
+    },
+    shadowOpacity: 0.1,
+    shadowRadius: 3.84,
+    elevation: 5,
+    borderWidth: 1,
+    borderColor: Colors.border,
+    alignItems: 'center',
+    gap: 4,
+  },
+  liveIndicatorContainer: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    marginBottom: 4,
+  },
+  statusDot: {
+    width: 8,
+    height: 8,
+    borderRadius: 4,
   },
   runtimeCheckText: {
-    fontSize: 10,
+    fontSize: 11,
     color: Colors.textSecondary,
+    fontWeight: '500',
   },
 });

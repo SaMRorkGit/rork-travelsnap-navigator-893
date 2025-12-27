@@ -140,6 +140,8 @@ export class DeepgramVoiceAgentService {
   private recordingUri: string | null = null;
 
   private mediaRecorder: any = null; // For Web MediaRecorder
+  private totalBytesSent: number = 0;
+  private chunkCount: number = 0;
   private connectionTime: number = 0;
   private lastSendTime: number = 0;
   private settingsApplied: boolean = false;
@@ -159,14 +161,17 @@ export class DeepgramVoiceAgentService {
 
   private async connectWithRetry(attempt: number): Promise<void> {
     console.log(`[DeepgramVoiceAgent] Connection attempt ${attempt + 1}/${this.maxReconnectAttempts}`);
-
-
+    
+    // Check network connectivity first if possible (optional, but good practice)
+    
     try {
       await this.initWebSocket();
     } catch (error) {
+      console.error(`[DeepgramVoiceAgent] Connection attempt ${attempt + 1} failed:`, error);
+      
       if (attempt < this.maxReconnectAttempts) {
         const backoff = Math.pow(2, attempt) * 1000;
-        console.log(`[DeepgramVoiceAgent] Connection failed, retrying in ${backoff}ms...`);
+        console.log(`[DeepgramVoiceAgent] Retrying in ${backoff}ms...`);
         await new Promise(resolve => setTimeout(resolve, backoff));
         return this.connectWithRetry(attempt + 1);
       }
@@ -193,13 +198,18 @@ export class DeepgramVoiceAgentService {
         }, 10000);
 
         this.ws.onopen = () => {
+          console.log('[DeepgramVoiceAgent] ========================================');
           console.log('[DeepgramVoiceAgent] ✓ WebSocket successfully connected!');
+          console.log('[DeepgramVoiceAgent] ========================================');
           console.log('[DeepgramVoiceAgent] Connection state: OPEN');
           console.log(`[DeepgramVoiceAgent] Connected in ${Date.now() - this.connectionTime}ms`);
           clearTimeout(connectionTimeout);
           this.isConnected = true;
           this.settingsApplied = false;
           this.reconnectAttempts = 0;
+          this.chunkCount = 0;
+          this.totalBytesSent = 0;
+          
           this.sendSettings();
           this.callbacks.onConnected?.();
           resolve();
@@ -382,7 +392,7 @@ Examples:
   sendAudio(audioData: ArrayBuffer): void {
     if (this.ws && this.ws.readyState === WebSocket.OPEN) {
       if (!this.settingsApplied) {
-         console.log('[DeepgramVoiceAgent] ⚠️ Sending audio before SettingsApplied received');
+         console.warn('[DeepgramVoiceAgent] ⚠️ Sending audio before SettingsApplied received - this may cause issues');
       }
 
       this.ws.send(audioData);
@@ -390,9 +400,14 @@ Examples:
       const now = Date.now();
       const timeSinceLast = this.lastSendTime ? now - this.lastSendTime : 0;
       this.lastSendTime = now;
+      this.chunkCount++;
+      this.totalBytesSent += audioData.byteLength;
       
-      // Log chunk details for verification
-      console.log(`[DeepgramVoiceAgent] ♪ Sending Audio Chunk: ${audioData.byteLength} bytes | Δ ${timeSinceLast}ms`);
+      // Detailed logging for verification as requested
+      if (this.chunkCount % 10 === 1 || audioData.byteLength > 0) { // Log every chunk if possible, or limit if too spammy.
+         // For verification phase, we log everything.
+         console.log(`[DeepgramVoiceAgent] ♪ Chunk #${this.chunkCount}: ${audioData.byteLength} bytes | Total: ${this.totalBytesSent} bytes | Δ ${timeSinceLast}ms | sent to socket`);
+      }
     } else {
       console.error('[DeepgramVoiceAgent] ✗ Cannot send audio - WebSocket not open!');
       console.error('[DeepgramVoiceAgent]   Current state:', this.ws?.readyState);
@@ -532,15 +547,22 @@ Examples:
     if (!this.recordingUri || !this.isRecording) return;
     
     // Skip file reading on Web as it works differently (uses MediaRecorder events)
+    // Web implementation is handled in startWebListening() via mediaRecorder.ondataavailable
     if (Platform.OS === 'web') return;
 
     try {
       const info = await FileSystem.getInfoAsync(this.recordingUri);
-      if (!info.exists) return;
+      if (!info.exists) {
+        console.warn('[DeepgramVoiceAgent] Recording file not found:', this.recordingUri);
+        return;
+      }
 
       const currentSize = info.size;
       if (currentSize > this.lastFilePosition) {
         const bytesToRead = currentSize - this.lastFilePosition;
+        
+        // Log reading status
+        // console.log(`[DeepgramVoiceAgent] Reading file: ${this.lastFilePosition} -> ${currentSize} (${bytesToRead} bytes)`);
         
         if (bytesToRead > 0) {
           const chunkBase64 = await FileSystem.readAsStringAsync(this.recordingUri, {
