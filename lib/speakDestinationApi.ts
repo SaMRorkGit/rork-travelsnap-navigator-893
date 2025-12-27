@@ -1,7 +1,5 @@
 import { Audio } from 'expo-av';
-import * as Location from 'expo-location';
 import { GeocodingResult, RouteData, RouteStep, OmioBookingLink } from '@/types';
-import { LocationService } from './services/LocationService';
 import { transcribeWithRorkToolkitFallback } from './services/DeepgramVoiceAgentService';
 
 // =============================================================================
@@ -76,57 +74,59 @@ export async function transcribeAudioWithRorkToolkit(recording: Audio.Recording)
 // =============================================================================
 
 export async function geocodeAddress(address: string): Promise<GeocodingResult[]> {
-  console.log('[SpeakDestinationAPI] Geocoding address:', address);
+  console.group('[SpeakDestinationAPI] Geocoding');
+  console.log(`[${new Date().toISOString()}] Requesting geocode for: "${address}"`);
   
-  if (MAPBOX_ACCESS_TOKEN === 'YOUR_MAPBOX_ACCESS_TOKEN') {
-    if (__DEV__) {
-      console.warn('[SpeakDestinationAPI] Mapbox Access Token not configured. Geocoding will use Expo Location fallback.');
-    }
-    // Fallback to Expo Location geocoding
-    try {
-      const results = await Location.geocodeAsync(address);
-      if (results.length > 0) {
-        return results.map((result) => ({
-          placeName: address,
-          latitude: result.latitude,
-          longitude: result.longitude,
-          relevance: 1.0,
-        }));
-      }
-      return [];
-    } catch (fallbackError) {
-      console.error('[SpeakDestinationAPI] Fallback geocoding failed:', fallbackError);
-      throw new Error('Could not geocode address. Please configure EXPO_PUBLIC_MAPBOX_ACCESS_TOKEN or ensure location services are available.');
-    }
+  if (!MAPBOX_ACCESS_TOKEN || MAPBOX_ACCESS_TOKEN === 'YOUR_MAPBOX_ACCESS_TOKEN') {
+    console.error('✗ Mapbox Access Token is missing or default.');
+    console.groupEnd();
+    throw new Error('Mapbox configuration is missing. Please set EXPO_PUBLIC_MAPBOX_ACCESS_TOKEN.');
   }
   
   const encodedAddress = encodeURIComponent(address);
   const url = `https://api.mapbox.com/geocoding/v5/mapbox.places/${encodedAddress}.json?access_token=${MAPBOX_ACCESS_TOKEN}&limit=5&types=address,place,poi`;
 
+  console.log(`[${new Date().toISOString()}] API URL: ${url.replace(MAPBOX_ACCESS_TOKEN, '***')}`);
+
   try {
+    const startTime = Date.now();
     const response = await fetch(url);
+    const duration = Date.now() - startTime;
+    
+    console.log(`[${new Date().toISOString()}] Response Status: ${response.status} (${duration}ms)`);
     
     if (!response.ok) {
       const errorText = await response.text();
-      console.error('[SpeakDestinationAPI] Mapbox Geocoding error:', errorText);
+      console.error('✗ Mapbox API error:', errorText);
+      console.groupEnd();
       throw new Error(`Geocoding API error: ${response.status}`);
     }
 
     const data = await response.json();
-    console.log('[SpeakDestinationAPI] Geocoding results:', data.features?.length || 0);
+    console.log(`[${new Date().toISOString()}] Results found: ${data.features?.length || 0}`);
+    
+    if (data.features?.length > 0) {
+      console.log('Top result:', data.features[0].place_name);
+    }
 
     if (!data.features || data.features.length === 0) {
+      console.warn('! No results found for this address');
+      console.groupEnd();
       return [];
     }
 
-    return data.features.map((feature: any) => ({
+    const results = data.features.map((feature: any) => ({
       placeName: feature.place_name,
       longitude: feature.center[0],
       latitude: feature.center[1],
       relevance: feature.relevance,
     }));
+    
+    console.groupEnd();
+    return results;
   } catch (error) {
-    console.error('[SpeakDestinationAPI] Geocoding error:', error);
+    console.error('✗ Geocoding exception:', error);
+    console.groupEnd();
     throw error;
   }
 }
@@ -167,46 +167,32 @@ export async function getDirections(
   destLng: number,
   profile: 'driving' | 'walking' | 'cycling' = 'driving'
 ): Promise<RouteData> {
-  console.log('[SpeakDestinationAPI] Getting directions from', originLat, originLng, 'to', destLat, destLng);
+  console.group('[SpeakDestinationAPI] Directions');
+  console.log(`[${new Date().toISOString()}] Requesting ${profile} directions`);
+  console.log(`From: ${originLat},${originLng}`);
+  console.log(`To: ${destLat},${destLng}`);
   
-  if (MAPBOX_ACCESS_TOKEN === 'YOUR_MAPBOX_ACCESS_TOKEN') {
-    if (__DEV__) {
-      console.warn('[SpeakDestinationAPI] Mapbox Access Token not configured. Creating basic route without detailed directions.');
-    }
-    // Return a basic route without detailed steps when Mapbox is not configured
-    const distance = LocationService.calculateDistance(
-      { latitude: originLat, longitude: originLng },
-      { latitude: destLat, longitude: destLng }
-    );
-    // Estimate duration: ~50 km/h average for driving
-    const estimatedDuration = (distance / 1000 / 50) * 3600; // seconds
-    
-    return {
-      origin: { latitude: originLat, longitude: originLng },
-      destination: { latitude: destLat, longitude: destLng, address: '' },
-      totalDistance: distance,
-      totalDuration: estimatedDuration,
-      steps: [{
-        id: 'step-0',
-        instruction: `Navigate to destination`,
-        distance,
-        duration: estimatedDuration,
-        mode: profile === 'walking' ? 'walking' : profile === 'cycling' ? 'cycling' : 'driving',
-        coordinates: [[originLat, originLng], [destLat, destLng]],
-      }],
-      polyline: [[originLat, originLng], [destLat, destLng]],
-    };
+  if (!MAPBOX_ACCESS_TOKEN || MAPBOX_ACCESS_TOKEN === 'YOUR_MAPBOX_ACCESS_TOKEN') {
+    console.error('✗ Mapbox Access Token is missing or default.');
+    console.groupEnd();
+    throw new Error('Mapbox configuration is missing. Please set EXPO_PUBLIC_MAPBOX_ACCESS_TOKEN.');
   }
   
   const coordinates = `${originLng},${originLat};${destLng},${destLat}`;
   const url = `https://api.mapbox.com/directions/v5/mapbox/${profile}/${coordinates}?access_token=${MAPBOX_ACCESS_TOKEN}&geometries=geojson&steps=true&overview=full&annotations=duration,distance`;
+  
+  console.log(`[${new Date().toISOString()}] API URL: ${url.replace(MAPBOX_ACCESS_TOKEN, '***')}`);
 
   try {
+    const startTime = Date.now();
     const response = await fetch(url);
+    const duration = Date.now() - startTime;
+    
+    console.log(`[${new Date().toISOString()}] Response Status: ${response.status} (${duration}ms)`);
     
     if (!response.ok) {
       const errorText = await response.text();
-      console.warn('[SpeakDestinationAPI] Mapbox Directions error:', errorText);
+      console.warn('! Mapbox Directions error:', errorText);
 
       let errorMessage = `Directions API error: ${response.status}`;
       try {
@@ -225,19 +211,22 @@ export async function getDirections(
       } catch {
         // use default error message
       }
-
+      console.groupEnd();
       throw new Error(errorMessage);
     }
 
     const data = await response.json();
-    console.log('[SpeakDestinationAPI] Directions received, routes:', data.routes?.length || 0);
+    console.log(`[${new Date().toISOString()}] Routes found: ${data.routes?.length || 0}`);
 
     if (!data.routes || data.routes.length === 0) {
+      console.groupEnd();
       throw new Error('No routes found');
     }
 
     const route = data.routes[0];
     const legs = route.legs[0];
+    
+    console.log(`[${new Date().toISOString()}] Primary Route: ${formatDistance(route.distance)}, ${formatDuration(route.duration)}`);
 
     // Parse steps from Mapbox response
     const steps: RouteStep[] = legs.steps.map((step: any, index: number) => ({
@@ -271,9 +260,11 @@ export async function getDirections(
       polyline,
     };
 
+    console.groupEnd();
     return routeData;
   } catch (error) {
-    console.error('[SpeakDestinationAPI] Directions error:', error);
+    console.error('✗ Directions exception:', error);
+    console.groupEnd();
     throw error;
   }
 }

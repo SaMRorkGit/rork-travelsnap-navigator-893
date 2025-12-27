@@ -139,23 +139,41 @@ export class DeepgramVoiceAgentService {
   private lastFilePosition: number = 0;
   private recordingUri: string | null = null;
 
+  private mediaRecorder: any = null; // For Web MediaRecorder
+  private connectionTime: number = 0;
+  private lastChunkTime: number = 0;
+  private settingsApplied: boolean = false;
+
   constructor(callbacks: DeepgramVoiceAgentCallbacks) {
     this.callbacks = callbacks;
   }
 
   async connect(): Promise<void> {
-    console.log('[DeepgramVoiceAgent] ========================================');
-    console.log('[DeepgramVoiceAgent] Starting connection to Deepgram Voice Agent');
-    console.log('[DeepgramVoiceAgent] ========================================');
+    return this.connectWithRetry(0);
+  }
+
+  private async connectWithRetry(attempt: number): Promise<void> {
+    console.log(`[DeepgramVoiceAgent] Connection attempt ${attempt + 1}/${this.maxReconnectAttempts}`);
     
     const configCheck = verifyDeepgramConfiguration();
     if (!configCheck.isValid) {
-      console.error('[DeepgramVoiceAgent] ✗ Configuration check failed:', configCheck.error);
       throw new Error(configCheck.error);
     }
-    
-    console.log('[DeepgramVoiceAgent] ✓ Configuration verified successfully');
 
+    try {
+      await this.initWebSocket();
+    } catch (error) {
+      if (attempt < this.maxReconnectAttempts) {
+        const backoff = Math.pow(2, attempt) * 1000;
+        console.log(`[DeepgramVoiceAgent] Connection failed, retrying in ${backoff}ms...`);
+        await new Promise(resolve => setTimeout(resolve, backoff));
+        return this.connectWithRetry(attempt + 1);
+      }
+      throw error;
+    }
+  }
+
+  private initWebSocket(): Promise<void> {
     return new Promise((resolve, reject) => {
       try {
         const wsUrl = `${DEEPGRAM_WS_URL}?token=${DEEPGRAM_API_KEY}`;
@@ -163,6 +181,7 @@ export class DeepgramVoiceAgentService {
         
         this.ws = new WebSocket(wsUrl);
         this.ws.binaryType = 'arraybuffer';
+        this.connectionTime = Date.now();
 
         const connectionTimeout = setTimeout(() => {
           if (!this.isConnected) {
@@ -178,6 +197,7 @@ export class DeepgramVoiceAgentService {
           console.log('[DeepgramVoiceAgent] Ready state:', this.ws?.readyState);
           clearTimeout(connectionTimeout);
           this.isConnected = true;
+          this.settingsApplied = false;
           this.reconnectAttempts = 0;
           this.sendSettings();
           this.callbacks.onConnected?.();
@@ -190,11 +210,13 @@ export class DeepgramVoiceAgentService {
 
         this.ws.onerror = (error: Event) => {
           console.error('[DeepgramVoiceAgent] WebSocket error:', error);
-          clearTimeout(connectionTimeout);
-          this.callbacks.onError?.(new Error('WebSocket connection error'));
+          // Only reject if we haven't connected yet (initial connection failure)
+          // If we are already connected, the onclose/retry logic will handle it
           if (!this.isConnected) {
-            reject(new Error('Failed to connect to Deepgram'));
+             clearTimeout(connectionTimeout);
+             reject(new Error('WebSocket connection error'));
           }
+          this.callbacks.onError?.(new Error('WebSocket connection error'));
         };
 
         this.ws.onclose = (event: CloseEvent) => {
@@ -276,6 +298,7 @@ Examples:
         case 'SettingsApplied':
           console.log('[DeepgramVoiceAgent] ✓ Settings successfully applied!');
           console.log('[DeepgramVoiceAgent] Voice agent is now ready to receive audio');
+          this.settingsApplied = true;
           this.callbacks.onSettingsApplied?.();
           break;
 
@@ -349,12 +372,20 @@ Examples:
 
   sendAudio(audioData: ArrayBuffer): void {
     if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+      if (!this.settingsApplied) {
+        console.warn('[DeepgramVoiceAgent] ⚠ Sending audio before SettingsApplied received. This might be ignored by Deepgram.');
+      }
       this.ws.send(audioData);
-      console.log('[DeepgramVoiceAgent] → Sent audio chunk to WebSocket:', audioData.byteLength, 'bytes');
+      const now = Date.now();
+      const timeSinceLast = this.lastChunkTime ? now - this.lastChunkTime : 0;
+      this.lastChunkTime = now;
+      
+      console.log(`[DeepgramVoiceAgent] → Sent audio chunk: ${audioData.byteLength} bytes, Δ${timeSinceLast}ms`);
     } else {
       console.error('[DeepgramVoiceAgent] ✗ Cannot send audio - WebSocket not open!');
       console.error('[DeepgramVoiceAgent]   Current state:', this.ws?.readyState);
       console.error('[DeepgramVoiceAgent]   Expected state: 1 (OPEN)');
+      this.callbacks.onError?.(new Error('WebSocket connection lost during streaming'));
     }
   }
 
@@ -364,9 +395,14 @@ Examples:
       return;
     }
 
+    if (Platform.OS === 'web') {
+      await this.startWebListening();
+      return;
+    }
+
     try {
       console.log('[DeepgramVoiceAgent] ========================================');
-      console.log('[DeepgramVoiceAgent] Starting audio recording and streaming');
+      console.log('[DeepgramVoiceAgent] Starting audio recording and streaming (Native)');
       console.log('[DeepgramVoiceAgent] ========================================');
       
       const permission = await Audio.requestPermissionsAsync();
@@ -387,6 +423,7 @@ Examples:
       this.lastFilePosition = 0;
       this.isRecording = true;
 
+      // Set update interval to 150ms for chunking
       recording.setProgressUpdateInterval(150);
       recording.setOnRecordingStatusUpdate((status) => {
         if (status.isRecording) {
@@ -400,7 +437,6 @@ Examples:
       console.log('[DeepgramVoiceAgent]   URI:', this.recordingUri);
       console.log('[DeepgramVoiceAgent]   Platform:', Platform.OS);
       console.log('[DeepgramVoiceAgent]   WebSocket state:', this.ws?.readyState);
-      console.log('[DeepgramVoiceAgent] Audio will be streamed to Deepgram in real-time');
 
     } catch (error) {
       console.error('[DeepgramVoiceAgent] Failed to start recording:', error);
@@ -410,31 +446,70 @@ Examples:
     }
   }
 
+  private async startWebListening(): Promise<void> {
+    try {
+      console.log('[DeepgramVoiceAgent] Starting audio recording and streaming (Web)');
+      
+      // @ts-ignore - Navigator mediaDevices
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      
+      // @ts-ignore - MediaRecorder
+      this.mediaRecorder = new MediaRecorder(stream, { mimeType: 'audio/webm' });
+      
+      this.mediaRecorder.ondataavailable = (event: any) => {
+        if (event.data.size > 0 && this.ws?.readyState === WebSocket.OPEN) {
+          event.data.arrayBuffer().then((buffer: ArrayBuffer) => {
+            this.sendAudio(buffer);
+          });
+        }
+      };
+
+      this.mediaRecorder.start(200); // 200ms timeslices
+      this.isRecording = true;
+      console.log('[DeepgramVoiceAgent] ✓ Web MediaRecorder started');
+
+    } catch (error) {
+      console.error('[DeepgramVoiceAgent] Failed to start web recording:', error);
+      this.callbacks.onError?.(new Error('Failed to start microphone on Web'));
+      throw error;
+    }
+  }
+
   async stopListening(): Promise<void> {
-    if (!this.isRecording || !this.recording) {
+    if (!this.isRecording) {
       return;
     }
 
     console.log('[DeepgramVoiceAgent] Stopping recording...');
+    this.isRecording = false;
+
+    if (Platform.OS === 'web') {
+      if (this.mediaRecorder && this.mediaRecorder.state !== 'inactive') {
+        this.mediaRecorder.stop();
+        this.mediaRecorder.stream.getTracks().forEach((track: any) => track.stop());
+        this.mediaRecorder = null;
+      }
+      return;
+    }
     
-    try {
-      await this.recording.stopAndUnloadAsync();
-      
-      // Process any remaining audio
-      await this.processAudioStream();
-      
-    } catch (error) {
-      console.error('[DeepgramVoiceAgent] Error stopping recording:', error);
-    } finally {
-      this.isRecording = false;
-      this.recording = null;
-      this.recordingUri = null;
-      this.lastFilePosition = 0;
-      
-      await Audio.setAudioModeAsync({
-        allowsRecordingIOS: false,
-        playsInSilentModeIOS: true,
-      });
+    // Native stop logic
+    if (this.recording) {
+      try {
+        await this.recording.stopAndUnloadAsync();
+        // Process any remaining audio
+        await this.processAudioStream();
+      } catch (error) {
+        console.error('[DeepgramVoiceAgent] Error stopping recording:', error);
+      } finally {
+        this.recording = null;
+        this.recordingUri = null;
+        this.lastFilePosition = 0;
+        
+        await Audio.setAudioModeAsync({
+          allowsRecordingIOS: false,
+          playsInSilentModeIOS: true,
+        }).catch(() => {});
+      }
     }
   }
 
@@ -485,10 +560,15 @@ Examples:
 
     console.log('[DeepgramVoiceAgent] Disconnecting...');
     this.isConnected = false;
+    this.settingsApplied = false;
     
     if (this.ws) {
       this.ws.close();
       this.ws = null;
+    }
+    
+    if (this.mediaRecorder) {
+      this.stopListening();
     }
 
     if (this.sound) {

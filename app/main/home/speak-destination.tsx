@@ -110,6 +110,7 @@ export default function SpeakDestinationScreen() {
   const [isSpeaking, setIsSpeaking] = useState(false);
   const [selectedStepIndex, setSelectedStepIndex] = useState<number | null>(null);
   const [isAgentSpeaking, setIsAgentSpeaking] = useState(false);
+  const [isReadyToSpeak, setIsReadyToSpeak] = useState(false);
   
   const deepgramServiceRef = useRef<DeepgramVoiceAgentService | null>(null);
   const pulseAnim = useRef(new Animated.Value(1)).current;
@@ -199,9 +200,16 @@ export default function SpeakDestinationScreen() {
       deepgramServiceRef.current = null;
     }
     
+    // Clear previous session state completely
+    setRecognizedText('');
+    setExtractedDestination(null);
+    setRouteData(null);
+    setBookingLinks(new Map());
+    
     try {
       await requestPermissions();
       setFlowState('listening');
+      setIsReadyToSpeak(false);
       
       console.log('[SpeakDestination] Creating Deepgram Voice Agent session...');
       const service = await createVoiceAgentSession({
@@ -210,6 +218,9 @@ export default function SpeakDestinationScreen() {
         },
         onSettingsApplied: () => {
           console.log('[SpeakDestination] ✓ Deepgram settings applied - ready to receive audio');
+          if (isMountedRef.current) {
+            setIsReadyToSpeak(true);
+          }
         },
         onTranscript: (text, role) => {
           console.log('[SpeakDestination] ========================================');
@@ -485,6 +496,7 @@ export default function SpeakDestinationScreen() {
     setBookingLinks(new Map());
     setSelectedStepIndex(null);
     setIsAgentSpeaking(false);
+    setIsReadyToSpeak(false);
     
     if (deepgramServiceRef.current) {
       deepgramServiceRef.current.disconnect();
@@ -527,24 +539,47 @@ export default function SpeakDestinationScreen() {
         <Mic color="#FFFFFF" size={32} strokeWidth={2} />
         <Text style={styles.speakButtonText}>Start Speaking</Text>
       </TouchableOpacity>
+      
+      <View style={styles.runtimeCheckContainer}>
+        <Text style={styles.runtimeCheckText}>
+          API Check: {process.env.EXPO_PUBLIC_DEEPGRAM_API_KEY ? '✅ Voice' : '❌ Voice'} • {process.env.EXPO_PUBLIC_MAPBOX_ACCESS_TOKEN ? '✅ Maps' : '❌ Maps'}
+        </Text>
+      </View>
     </View>
   );
 
   const renderListeningState = () => (
     <View style={styles.centeredContent}>
-      <Animated.View style={[styles.micContainer, { transform: [{ scale: pulseAnim }] }]}>
-        <View style={styles.micCircle}>
-          <Mic color={Colors.primary} size={48} strokeWidth={2} />
+      <Animated.View style={[
+        styles.micContainer, 
+        { transform: [{ scale: pulseAnim }] },
+        !isReadyToSpeak && styles.micContainerConnecting
+      ]}>
+        <View style={[styles.micCircle, !isReadyToSpeak && styles.micCircleConnecting]}>
+          {isReadyToSpeak ? (
+            <Mic color={Colors.primary} size={48} strokeWidth={2} />
+          ) : (
+            <ActivityIndicator color={Colors.textSecondary} size="large" />
+          )}
         </View>
       </Animated.View>
-      <Text style={styles.listeningText}>Listening...</Text>
-      <Text style={styles.listeningHint}>Say your destination clearly</Text>
+      
+      <Text style={styles.listeningText}>
+        {isReadyToSpeak ? 'Listening...' : 'Connecting...'}
+      </Text>
+      
+      <Text style={styles.listeningHint}>
+        {isReadyToSpeak ? 'Say your destination clearly' : 'Establishing secure connection'}
+      </Text>
+      
       {recognizedText ? (
         <Text style={styles.realtimeTranscript}>&quot;{recognizedText}&quot;</Text>
       ) : null}
+      
       {isAgentSpeaking ? (
         <Text style={styles.agentSpeakingText}>Agent is responding...</Text>
       ) : null}
+      
       <TouchableOpacity
         style={styles.stopButton}
         onPress={stopListening}
@@ -937,6 +972,13 @@ const styles = StyleSheet.create({
     borderWidth: 4,
     borderColor: `${Colors.primary}30`,
   },
+  micContainerConnecting: {
+    transform: [{ scale: 1 }],
+  },
+  micCircleConnecting: {
+    borderColor: Colors.border,
+    backgroundColor: Colors.surface,
+  },
   listeningText: {
     fontSize: 24,
     fontWeight: '600',
@@ -1251,5 +1293,18 @@ const styles = StyleSheet.create({
     fontSize: 16,
     fontWeight: '600',
     color: Colors.primary,
+  },
+  runtimeCheckContainer: {
+    position: 'absolute',
+    bottom: 20,
+    alignSelf: 'center',
+    paddingVertical: 4,
+    paddingHorizontal: 12,
+    backgroundColor: 'rgba(0,0,0,0.05)',
+    borderRadius: 12,
+  },
+  runtimeCheckText: {
+    fontSize: 10,
+    color: Colors.textSecondary,
   },
 });
