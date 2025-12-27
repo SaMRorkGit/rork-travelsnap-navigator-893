@@ -141,7 +141,7 @@ export class DeepgramVoiceAgentService {
 
   private mediaRecorder: any = null; // For Web MediaRecorder
   private connectionTime: number = 0;
-  private lastChunkTime: number = 0;
+  private lastSendTime: number = 0;
   private settingsApplied: boolean = false;
 
   constructor(callbacks: DeepgramVoiceAgentCallbacks) {
@@ -215,16 +215,24 @@ export class DeepgramVoiceAgentService {
           // If we are already connected, the onclose/retry logic will handle it
           if (!this.isConnected) {
              clearTimeout(connectionTimeout);
-             reject(new Error('WebSocket connection error'));
+             // Create a more descriptive error
+             const errorMsg = 'WebSocket connection error. Please check your internet connection.';
+             reject(new Error(errorMsg));
           }
           this.callbacks.onError?.(new Error('WebSocket connection error'));
         };
 
         this.ws.onclose = (event: CloseEvent) => {
-          console.log('[DeepgramVoiceAgent] WebSocket closed:', event.code, event.reason);
+          console.log(`[DeepgramVoiceAgent] WebSocket closed: ${event.code} ${event.reason}`);
           clearTimeout(connectionTimeout);
           this.isConnected = false;
-          this.callbacks.onDisconnected?.();
+          
+          if (event.code !== 1000) { // 1000 is normal closure
+             console.warn('[DeepgramVoiceAgent] Abnormal closure');
+             this.callbacks.onDisconnected?.();
+          } else {
+             this.callbacks.onDisconnected?.();
+          }
         };
       } catch (error) {
         console.error('[DeepgramVoiceAgent] Failed to create WebSocket:', error);
@@ -373,17 +381,18 @@ Examples:
 
   sendAudio(audioData: ArrayBuffer): void {
     if (this.ws && this.ws.readyState === WebSocket.OPEN) {
-      // Don't warn about settings not applied, just send. Deepgram buffers or handles it.
-      // But we can log if we are sending very early.
-      
+      if (!this.settingsApplied) {
+         console.log('[DeepgramVoiceAgent] ⚠️ Sending audio before SettingsApplied received');
+      }
+
       this.ws.send(audioData);
-      const now = Date.now();
-      const timeSinceLast = this.lastChunkTime ? now - this.lastChunkTime : 0;
-      this.lastChunkTime = now;
       
-      // Log every few chunks or if interval is irregular to avoid spamming too much, 
-      // but user asked for logs. We will log all.
-      console.log(`[DeepgramVoiceAgent] ♪ Audio Chunk: ${audioData.byteLength} bytes | Δ ${timeSinceLast}ms | Total Queued: ${this.audioQueue.length}`);
+      const now = Date.now();
+      const timeSinceLast = this.lastSendTime ? now - this.lastSendTime : 0;
+      this.lastSendTime = now;
+      
+      // Log chunk details for verification
+      console.log(`[DeepgramVoiceAgent] ♪ Sending Audio Chunk: ${audioData.byteLength} bytes | Δ ${timeSinceLast}ms`);
     } else {
       console.error('[DeepgramVoiceAgent] ✗ Cannot send audio - WebSocket not open!');
       console.error('[DeepgramVoiceAgent]   Current state:', this.ws?.readyState);
@@ -462,15 +471,17 @@ Examples:
       this.mediaRecorder.ondataavailable = (event: any) => {
         if (event.data.size > 0 && this.ws?.readyState === WebSocket.OPEN) {
           event.data.arrayBuffer().then((buffer: ArrayBuffer) => {
-             console.log(`[DeepgramVoiceAgent] [Web] Sending audio chunk: ${buffer.byteLength} bytes`);
+             // Web MediaRecorder might give larger chunks, but we just stream what we get
              this.sendAudio(buffer);
+          }).catch((err: any) => {
+             console.error('[DeepgramVoiceAgent] Error converting web audio blob:', err);
           });
         }
       };
 
-      this.mediaRecorder.start(150); // 150ms timeslices for consistent chunking
+      this.mediaRecorder.start(200); // 200ms timeslices for consistent chunking
       this.isRecording = true;
-      console.log('[DeepgramVoiceAgent] ✓ Web MediaRecorder started with 150ms timeslice');
+      console.log('[DeepgramVoiceAgent] ✓ Web MediaRecorder started with 200ms timeslice');
 
     } catch (error) {
       console.error('[DeepgramVoiceAgent] Failed to start web recording:', error);
@@ -520,7 +531,7 @@ Examples:
   private async processAudioStream(): Promise<void> {
     if (!this.recordingUri || !this.isRecording) return;
     
-    // Skip file reading on Web as it works differently
+    // Skip file reading on Web as it works differently (uses MediaRecorder events)
     if (Platform.OS === 'web') return;
 
     try {
@@ -544,7 +555,6 @@ Examples:
              for (let i = 0; i < binaryString.length; i++) {
                bytes[i] = binaryString.charCodeAt(i);
              }
-             console.log('[DeepgramVoiceAgent] ✓ Streaming audio chunk:', bytes.buffer.byteLength, 'bytes');
              this.sendAudio(bytes.buffer);
           }
 
@@ -553,7 +563,7 @@ Examples:
       }
     } catch (error) {
       console.error('[DeepgramVoiceAgent] ✗ Error processing audio stream:', error);
-      console.error('[DeepgramVoiceAgent] Error details:', JSON.stringify(error, null, 2));
+      // Don't stop everything, just log. Temporary file access error shouldn't kill the session.
     }
   }
 

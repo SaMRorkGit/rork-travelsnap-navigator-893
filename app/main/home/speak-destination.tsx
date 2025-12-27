@@ -53,6 +53,11 @@ import {
   createVoiceAgentSession,
   verifyDeepgramConfiguration,
 } from '@/lib/services/DeepgramVoiceAgentService';
+import {
+  createVoiceSession,
+  validateTranscript,
+  VoiceSession,
+} from '@/lib/services/VoiceSessionService';
 
 function verifyMapboxConfiguration(): { isValid: boolean; error?: string } {
   const mapboxToken = process.env.EXPO_PUBLIC_MAPBOX_ACCESS_TOKEN || '';
@@ -112,6 +117,7 @@ export default function SpeakDestinationScreen() {
   const [isAgentSpeaking, setIsAgentSpeaking] = useState(false);
   const [connectionStatus, setConnectionStatus] = useState<string>('Initializing...');
   const [isReadyToSpeak, setIsReadyToSpeak] = useState(false);
+  const [voiceSession, setVoiceSession] = useState<VoiceSession | null>(null);
   
   const deepgramServiceRef = useRef<DeepgramVoiceAgentService | null>(null);
   const pulseAnim = useRef(new Animated.Value(1)).current;
@@ -209,6 +215,11 @@ export default function SpeakDestinationScreen() {
     setRouteData(null);
     setBookingLinks(new Map());
     
+    // Create new validation session
+    const currentVoiceSession = createVoiceSession();
+    setVoiceSession(currentVoiceSession);
+    console.log('[SpeakDestination] Created new voice session:', currentVoiceSession.sessionId);
+    
     try {
       await requestPermissions();
       setFlowState('listening');
@@ -238,8 +249,15 @@ export default function SpeakDestinationScreen() {
           
           if (isMountedRef.current) {
             if (role === 'user') {
-              console.log('[SpeakDestination] ✓ Setting recognized text to UI');
-              setRecognizedText(text);
+              // Validate transcript to prevent hallucinations/stale data
+              const validation = validateTranscript(text, currentVoiceSession.sessionId, currentVoiceSession);
+              
+              if (validation.valid) {
+                console.log('[SpeakDestination] ✓ Transcript validated and applied');
+                setRecognizedText(text);
+              } else {
+                console.warn('[SpeakDestination] ⚠️ Transcript rejected:', validation.error);
+              }
             }
           }
         },
@@ -516,6 +534,7 @@ export default function SpeakDestinationScreen() {
     setIsAgentSpeaking(false);
     setIsReadyToSpeak(false);
     setConnectionStatus('Initializing...');
+    setVoiceSession(null);
     
     if (deepgramServiceRef.current) {
       deepgramServiceRef.current.disconnect();
@@ -563,6 +582,16 @@ export default function SpeakDestinationScreen() {
         <Text style={styles.runtimeCheckText}>
           API Check: {process.env.EXPO_PUBLIC_DEEPGRAM_API_KEY ? '✅ Voice' : '❌ Voice'} • {process.env.EXPO_PUBLIC_MAPBOX_ACCESS_TOKEN ? '✅ Maps' : '❌ Maps'}
         </Text>
+        {Platform.OS === 'web' && (
+           <Text style={[styles.runtimeCheckText, { marginTop: 4 }]}>
+             ℹ️ Web Support Active
+           </Text>
+        )}
+        {voiceSession && (
+          <Text style={[styles.runtimeCheckText, { marginTop: 4 }]}>
+            ID: {voiceSession.sessionId.split('-')[1]}
+          </Text>
+        )}
       </View>
     </View>
   );
