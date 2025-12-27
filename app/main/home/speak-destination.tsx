@@ -110,6 +110,7 @@ export default function SpeakDestinationScreen() {
   const [isSpeaking, setIsSpeaking] = useState(false);
   const [selectedStepIndex, setSelectedStepIndex] = useState<number | null>(null);
   const [isAgentSpeaking, setIsAgentSpeaking] = useState(false);
+  const [connectionStatus, setConnectionStatus] = useState<string>('Initializing...');
   const [isReadyToSpeak, setIsReadyToSpeak] = useState(false);
   
   const deepgramServiceRef = useRef<DeepgramVoiceAgentService | null>(null);
@@ -173,6 +174,8 @@ export default function SpeakDestinationScreen() {
     console.log('[SpeakDestination] Starting Speak Destination flow');
     console.log('[SpeakDestination] ========================================');
     
+    setConnectionStatus('Checking configuration...');
+    
     const deepgramConfig = verifyDeepgramConfiguration();
     if (!deepgramConfig.isValid) {
       console.error('[SpeakDestination] ✗ Deepgram verification failed:', deepgramConfig.error);
@@ -210,16 +213,19 @@ export default function SpeakDestinationScreen() {
       await requestPermissions();
       setFlowState('listening');
       setIsReadyToSpeak(false);
+      setConnectionStatus('Connecting to voice server...');
       
       console.log('[SpeakDestination] Creating Deepgram Voice Agent session...');
       const service = await createVoiceAgentSession({
         onConnected: () => {
           console.log('[SpeakDestination] ✓ Deepgram WebSocket connected successfully');
+          setConnectionStatus('Connected. Initializing...');
         },
         onSettingsApplied: () => {
           console.log('[SpeakDestination] ✓ Deepgram settings applied - ready to receive audio');
           if (isMountedRef.current) {
             setIsReadyToSpeak(true);
+            setConnectionStatus('Listening...');
           }
         },
         onTranscript: (text, role) => {
@@ -320,14 +326,26 @@ export default function SpeakDestinationScreen() {
       }
       
       // Wait a bit for final results if needed, but results come via callbacks
+      // We set a timeout to transition if no destination is found, but we should give user feedback
+      setConnectionStatus('Processing speech...');
+      
       setTimeout(() => {
         if (isMountedRef.current && flowState === 'processing' && !extractedDestination) {
           if (recognizedText && recognizedText.trim() !== '') {
-            setFlowState('confirming');
+             // If we have text but no function call, let's try to use the text as destination
+             console.log('[SpeakDestination] Timeout waiting for function call. Using transcript as destination.');
+             setExtractedDestination(recognizedText);
+             setFlowState('confirming');
           } else {
-             // Don't error out immediately, maybe still waiting for transcript
-             // But if too long, then error
-             // actually we can rely on the check inside the service or callbacks
+             // Only error if we really have nothing
+             // setFlowState('error');
+             // setErrorMessage('No speech detected. Please try again.');
+             // Actually, staying in processing or going back to idle might be better, 
+             // but let's show error to be explicit as requested.
+             if (flowState === 'processing') {
+                setFlowState('error');
+                setErrorMessage('I didn\'t catch that. Please speak clearly.');
+             }
           }
         }
       }, 5000);
@@ -497,6 +515,7 @@ export default function SpeakDestinationScreen() {
     setSelectedStepIndex(null);
     setIsAgentSpeaking(false);
     setIsReadyToSpeak(false);
+    setConnectionStatus('Initializing...');
     
     if (deepgramServiceRef.current) {
       deepgramServiceRef.current.disconnect();
@@ -569,7 +588,7 @@ export default function SpeakDestinationScreen() {
       </Text>
       
       <Text style={styles.listeningHint}>
-        {isReadyToSpeak ? 'Say your destination clearly' : 'Establishing secure connection'}
+        {isReadyToSpeak ? 'Say your destination clearly' : connectionStatus}
       </Text>
       
       {recognizedText ? (
